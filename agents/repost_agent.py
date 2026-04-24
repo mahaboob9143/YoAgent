@@ -271,14 +271,7 @@ class RepostAgent:
                     f"({aspect_ratio:.2f})"
                 )
                 # Log it so we don't re-check this post
-                log_repost(
-                    source_username=username,
-                    source_post_id=post_id,
-                    source_shortcode=post_id,
-                    local_image_path="",
-                    original_caption=post.caption or "",
-                    rewritten_caption="[SKIPPED: incompatible aspect ratio]",
-                )
+                log_repost(post_id)
                 return None
 
             # Crop to Instagram-safe ratio + resize to max 1080px

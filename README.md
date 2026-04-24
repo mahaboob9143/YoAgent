@@ -12,7 +12,9 @@ A fully autonomous Instagram repost agent that scrapes public competitor content
 
 ## Local Setup
 
-1. Copy `.env.example` (or the format mentioned in deployment) to `.env`.
+1. Create a `.env` file containing only the parameters required for your features:
+   - `META_ACCESS_TOKEN` & `IG_ACCOUNT_ID` (Required for publishing)
+   - `CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET` (Required for hosting public images)
 2. Install dependencies:
    ```bash
    pip install -r requirements.txt

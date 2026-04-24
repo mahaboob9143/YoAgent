@@ -44,8 +44,7 @@ The schedule is defined in `.github/workflows/repost.yml`.
 - **Morning:** `30 1 * * *` (1:30 AM UTC = 7:00 AM IST)
 - **Evening:** `30 13 * * *` (1:30 PM UTC = 7:00 PM IST)
 
-**Humanization Delay:** The script automatically runs a `sleep $((RANDOM % 1800))` command which introduces a random delay of 0-30 minutes, so posts aren't made at the exact same minute every day.
-
+**Humanization Delay:** The action file contains a short `sleep` command which introduces a random delay of 0-10 seconds before posting for scheduled cron runs (manual deployments skip this completely for testing).
 ---
 
 ## 4. Give GitHub Actions Write Permissions
