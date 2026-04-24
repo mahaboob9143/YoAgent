@@ -38,3 +38,6 @@ colorlog==6.8.2
 
 # Cloudinary for cloud image hosting (replaces ngrok)
 cloudinary==1.39.0
+
+# Instagram scraping for Repost mode
+instaloader==4.13.2
