@@ -38,7 +38,7 @@ class Orchestrator:
         rewrites the caption, and posts to Instagram. Then exits cleanly.
         """
         logger.info("=" * 60)
-        logger.info("  REPOST NOW — scrape & publish pipeline")
+        logger.info("  REPOST NOW — scrape & publish pipeline (IG + Facebook)")
         logger.info("=" * 60)
 
         # ── Step 1: Scrape + prepare ───────────────────────────────────────
@@ -67,8 +67,8 @@ class Orchestrator:
             logger.info(f"  Image  : {image.get('local_path', 'N/A')}")
             return
 
-        # ── Step 2: Publish via PosterAgent ───────────────────────────────
-        logger.info("Posting to Instagram now...")
+        # ── Step 2: Publish via PosterAgent (Instagram + Facebook) ───────────
+        logger.info("Publishing to Instagram (and Facebook if enabled)...")
         ig_post_id: Optional[str] = self.poster_agent.post(
             image=image,
             caption=caption,
@@ -79,9 +79,6 @@ class Orchestrator:
             logger.error("Post failed. Check logs/errors.log for details.")
             return
 
-        # ── Step 3: Record published post ID ───────────────────────────────
-        from core.repost_tracker import mark_reposted
-        mark_reposted(source_post_id)
-
         logger.info(f"Repost complete. IG post ID: {ig_post_id}")
+
 

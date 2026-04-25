@@ -6,9 +6,10 @@
 *.sqlite
 *.sqlite3
 
-# Downloaded media
-media/queue/*
-!media/queue/.gitkeep
+# Downloaded media — never commit these
+media/reposts/*
+media/temp*
+!media/reposts/.gitkeep
 
 # Logs
 logs/*

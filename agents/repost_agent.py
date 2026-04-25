@@ -34,6 +34,7 @@ from core.repost_tracker import is_reposted as is_post_reposted, mark_reposted a
 from core.flags import get_config
 from core.logger import get_logger
 from core.caption_engine import build_caption
+from core.post_state import get_next_post_type, save_post_type
 
 logger = get_logger("RepostAgent")
 
@@ -52,9 +53,9 @@ class RepostAgent:
 
     def run(self) -> Optional[Dict[str, Any]]:
         """
-        Main entry point. Checks flags, scrapes (no login), rewrites caption,
-        and returns a result dict with 'image' and 'caption' keys ready for
-        PosterAgent, or None if nothing actionable was found.
+        Main entry point. Enforces an alternating image→reel→image→reel pattern.
+        Checks what was posted last, picks the opposite type, and returns a result
+        dict ready for PosterAgent, or None if nothing found.
         """
         self.config = get_config()
         repost_cfg = self.config.get("repost", {})
@@ -70,6 +71,11 @@ class RepostAgent:
         max_check = int(repost_cfg.get("max_posts_to_check", 20))
         download_dir = repost_cfg.get("download_dir", "media/reposts")
         add_credit = repost_cfg.get("add_credit_line", True)
+        include_reels = repost_cfg.get("include_reels", False)
+
+        # ── Alternating Pattern ───────────────────────────────────────────────
+        next_type = get_next_post_type() if include_reels else "image"
+        logger.info(f"Pattern mode: this run will post a {next_type.upper()}.")
 
         os.makedirs(download_dir, exist_ok=True)
 
@@ -79,8 +85,13 @@ class RepostAgent:
                 max_check=max_check,
                 download_dir=download_dir,
                 add_credit=add_credit,
+                include_reels=include_reels,
+                preferred_type=next_type,
             )
             if result:
+                # Save which type was just posted for the next run
+                posted_type = "reel" if result.get("is_reel") else "image"
+                save_post_type(posted_type)
                 return result
 
         logger.warning("No new unseen posts found across all source accounts.")
@@ -174,11 +185,13 @@ class RepostAgent:
         max_check: int,
         download_dir: str,
         add_credit: bool,
+        include_reels: bool = False,
+        preferred_type: str = "image",
     ) -> Optional[Dict[str, Any]]:
-        """Scrape a public account using an authenticated instaloader session."""
+        """Scrape a public account for images and/or reels."""
         import instaloader
 
-        logger.info(f"Scraping profile @{username}...")
+        logger.info(f"Scraping @{username} — looking for a {preferred_type.upper()}...")
 
         try:
             L = self._get_loader()
@@ -189,29 +202,37 @@ class RepostAgent:
 
         logger.info(
             f"@{username}: {profile.mediacount} total posts — "
-            f"scanning up to {max_check} for unseen images..."
+            f"scanning up to {max_check} for unseen content..."
         )
 
-        # Collect image posts up to max_check
-        candidates = []
+        # Collect candidates (images and/or reels)
+        image_candidates = []
+        reel_candidates = []
         try:
             for post in profile.get_posts():
                 if post.is_video:
-                    continue
-                if post.typename not in ("GraphImage", "XDTGraphImage"):
-                    continue  # skip carousels/sidecars for now
-                candidates.append(post)
-                if len(candidates) >= max_check:
+                    if include_reels:
+                        reel_candidates.append(post)
+                elif post.typename in ("GraphImage", "XDTGraphImage"):
+                    image_candidates.append(post)
+                if len(image_candidates) + len(reel_candidates) >= max_check:
                     break
         except Exception as exc:
             logger.error(f"Error iterating posts from @{username}: {exc}")
 
-        if not candidates:
-            logger.warning(f"No image posts found on @{username}")
+        if not image_candidates and not reel_candidates:
+            logger.warning(f"No suitable posts found on @{username}")
             return None
 
-        # Shuffle to avoid always picking the newest post
-        random.shuffle(candidates)
+        # Shuffle within each group
+        random.shuffle(image_candidates)
+        random.shuffle(reel_candidates)
+
+        # Put preferred type first — fallback to the other type if none available
+        if preferred_type == "reel":
+            candidates = reel_candidates + image_candidates
+        else:
+            candidates = image_candidates + reel_candidates
 
         for post in candidates:
             post_id = str(post.shortcode)
@@ -225,12 +246,21 @@ class RepostAgent:
             if not self._is_post_suitable(post):
                 continue
 
-            result = self._download_and_prepare(
-                post=post,
-                username=username,
-                download_dir=download_dir,
-                add_credit=add_credit,
-            )
+            # Route to image or reel handler
+            if post.is_video:
+                result = self._download_and_prepare_reel(
+                    post=post,
+                    username=username,
+                    download_dir=download_dir,
+                    add_credit=add_credit,
+                )
+            else:
+                result = self._download_and_prepare(
+                    post=post,
+                    username=username,
+                    download_dir=download_dir,
+                    add_credit=add_credit,
+                )
             if result:
                 return result
 
@@ -398,3 +428,83 @@ class RepostAgent:
             add_credit=add_credit,
             credit_handle=credit_handle,
         )
+
+    # ── Reel downloader ───────────────────────────────────────────────────────
+
+    def _download_and_prepare_reel(
+        self,
+        post,
+        username: str,
+        download_dir: str,
+        add_credit: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """Download a video reel, validate duration, rewrite caption, mark as reposted."""
+        post_id = str(post.shortcode)
+
+        try:
+            video_url = post.video_url
+            if not video_url:
+                logger.warning(f"No video URL found for {post_id}")
+                return None
+
+            logger.info(f"Downloading reel {post_id} from @{username}...")
+
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                )
+            }
+
+            resp = requests.get(video_url, headers=headers, timeout=60, stream=True)
+            resp.raise_for_status()
+
+            filename = f"reel_{post_id}.mp4"
+            local_path = os.path.abspath(os.path.join(download_dir, filename))
+
+            with open(local_path, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    f.write(chunk)
+
+            file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
+            logger.info(f"Reel downloaded: {filename} ({file_size_mb:.1f} MB)")
+
+            # Instagram Reels: max 90 seconds. We check file size as a proxy.
+            # (Rough rule: >200MB is likely too long for a typical Reel)
+            if file_size_mb > 200:
+                logger.warning(f"Reel {post_id} is too large ({file_size_mb:.1f} MB) — skipping")
+                os.remove(local_path)
+                log_repost(post_id)
+                return None
+
+            # Rewrite caption
+            original_caption = post.caption or ""
+            rewritten = self._rewrite_caption(
+                original=original_caption,
+                add_credit=add_credit,
+                credit_handle=username,
+            )
+
+            # Mark as reposted
+            log_repost(post_id)
+            logger.info("Reel ready to post.")
+
+            video_dict = {
+                "id": f"reel_{post_id}",
+                "local_path": local_path,
+                "is_video": True,
+                "source_post_id": post_id,
+                "_cleanup_path": local_path,
+            }
+
+            return {
+                "image": video_dict,   # Kept as 'image' key for PosterAgent compatibility
+                "caption": rewritten,
+                "source_post_id": post_id,
+                "is_reel": True,
+            }
+
+        except Exception as exc:
+            logger.error(f"Failed to download reel {post_id}: {exc}", exc_info=True)
+            return None

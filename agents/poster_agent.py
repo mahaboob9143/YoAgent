@@ -23,6 +23,7 @@ from core.logger import get_logger
 from core.retry import retry
 from core.cloudinary_uploader import upload_image, delete_image
 from core.story_designer import create_story_image
+from agents.facebook_poster_agent import FacebookPosterAgent
 
 logger = get_logger("PosterAgent")
 
@@ -65,18 +66,32 @@ class PosterAgent:
         cloud_public_id: Optional[str] = None
 
         try:
-            logger.info("Using Cloudinary for image hosting (cloud native)...")
+            is_reel = image.get("is_video", False)
+            logger.info("Using Cloudinary for media hosting (cloud native)...")
             image_url, cloud_public_id = upload_image(local_path)
             if not image_url:
                 logger.error("Cloudinary upload failed. Cannot post.")
                 return None
                 
-            # 1. Post to Feed
-            ig_post_id = self._publish(image_url=image_url, caption=caption)
-            
-            # 2. Post to Story (if enabled)
+            # 1. Post to Feed (image or reel)
+            if is_reel:
+                logger.info("Detected video — publishing as Reel...")
+                ig_post_id = self._publish_reel(video_url=image_url, caption=caption)
+            else:
+                ig_post_id = self._publish(image_url=image_url, caption=caption)
+
+            # 2. Post to Facebook Page (same content, second platform)
             config = get_config()
-            if ig_post_id and config.get("repost", {}).get("post_to_story", False):
+            if config.get("facebook", {}).get("enabled", False):
+                fb_agent = FacebookPosterAgent()
+                if fb_agent.is_configured():
+                    image["cloudinary_url"] = image_url   # pass URL before cleanup
+                    fb_agent.post(image=image, caption=caption, is_reel=is_reel)
+                else:
+                    logger.warning("Facebook enabled in config but FB secrets not set.")
+
+            # 3. Post to Story (if enabled — images only)
+            if ig_post_id and not is_reel and config.get("repost", {}).get("post_to_story", False):
                 logger.info("Story mode enabled — sharing to Instagram Story...")
                 self._publish_story(local_path=local_path)
         except Exception as exc:
@@ -85,7 +100,8 @@ class PosterAgent:
         finally:
             # ── Cleanup Cloudinary ───────────────────────────────────────────
             if cloud_public_id:
-                delete_image(cloud_public_id)
+                res_type = "video" if image.get("is_video", False) else "image"
+                delete_image(cloud_public_id, resource_type=res_type)
 
             # ── Local File Cleanup (Always happens) ──────────────────────────
             cleanup_path = image.get("_cleanup_path") or image.get("local_path")
@@ -125,6 +141,39 @@ class PosterAgent:
         logger.info("Meta API [3/3]: publishing container...")
         ig_post_id = self._publish_container(container_id)
         return ig_post_id
+
+    def _publish_reel(self, video_url: str, caption: str) -> Optional[str]:
+        """Full 3-step Meta posting flow for Reels (videos)."""
+
+        # Step 1: Create Reel container
+        logger.info("Meta API [1/3]: creating Reel container...")
+        url = f"{_GRAPH_API_BASE}/{self.ig_account_id}/media"
+        data = {
+            "video_url": video_url,
+            "media_type": "REELS",
+            "caption": caption,
+            "share_to_feed": "true",   # also shows on the main profile grid
+            "access_token": self.access_token,
+        }
+        resp = requests.post(url, data=data, timeout=60)
+        if not resp.ok:
+            logger.error(f"Reel container failed: {resp.text[:500]}")
+            return None
+        container_id = resp.json().get("id")
+        logger.info(f"Reel container created: {container_id}")
+
+        # Step 2: Poll — Reels take longer to process (up to 5 mins)
+        time.sleep(random.uniform(5.0, 10.0))
+        logger.info("Meta API [2/3]: waiting for Reel to be ready (may take a minute)...")
+        ready = self._await_container(container_id, max_wait_secs=300)
+        if not ready:
+            logger.error(f"Reel container {container_id} did not finish in time")
+            return None
+
+        # Step 3: Publish
+        time.sleep(random.uniform(2.0, 5.0))
+        logger.info("Meta API [3/3]: publishing Reel...")
+        return self._publish_container(container_id)
 
     @retry(
         max_attempts=3,

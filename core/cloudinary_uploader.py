@@ -60,7 +60,7 @@ def upload_image(local_path: str, folder: str = "instaagent/reposts") -> tuple[O
         result = cloudinary.uploader.upload(
             local_path,
             folder=folder,
-            resource_type="image",
+            resource_type="auto",  # Supports both images and mp4 videos
         )
 
         public_url = result.get("secure_url")
@@ -74,9 +74,9 @@ def upload_image(local_path: str, folder: str = "instaagent/reposts") -> tuple[O
         return None, None
 
 
-def delete_image(public_id: str) -> None:
+def delete_image(public_id: str, resource_type: str = "image") -> None:
     """
-    Delete an image from Cloudinary by its public_id.
+    Delete an image/video from Cloudinary by its public_id.
     Called after Meta successfully publishes to avoid storage accumulation.
     """
     if not public_id:
@@ -92,8 +92,8 @@ def delete_image(public_id: str) -> None:
             api_secret=os.getenv("CLOUDINARY_API_SECRET"),
         )
 
-        cloudinary.uploader.destroy(public_id)
-        logger.info(f"Cloudinary cleanup OK: {public_id}")
+        cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        logger.info(f"Cloudinary cleanup OK: {public_id} ({resource_type})")
 
     except Exception as e:
         logger.warning(f"Cloudinary cleanup failed (non-critical): {e}")
