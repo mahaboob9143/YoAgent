@@ -1,20 +1,22 @@
-# InstaAgent — Python 3.11+ dependencies for Repost Pipeline
-
-# Image processing validation
-Pillow>=10.4.0
-
-# Meta Graph API HTTP clients
-requests==2.31.0
+# YoAgent — Python 3.11+ dependencies (YouTube Shorts Pipeline)
 
 # Config & environment
 python-dotenv==1.0.1
 PyYAML==6.0.1
 
-# Logging color (optional, used in logger.py)
+# Logging colour
 colorlog==6.8.2
 
-# Cloudinary for cloud image hosting
-cloudinary==1.39.0
+# HTTP (used by instaloader internally and for direct video downloads)
+requests==2.31.0
 
-# Instagram scraping for Repost mode
+# Instagram scraping (no-login public profile access)
 instaloader==4.13.2
+
+# YouTube Scraping
+yt-dlp>=2025.1.15
+
+# YouTube Data API v3
+google-api-python-client==2.126.0
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0

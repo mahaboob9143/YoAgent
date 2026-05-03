@@ -1,14 +1,19 @@
-name: Repost Pipeline
+name: YouTube Shorts Pipeline
 
 on:
   schedule:
-    # 0:30 AM UTC = 6:00 AM IST
-    # 12:30 PM UTC = 6:00 PM IST
-    - cron: '30 0,12 * * *'
-  workflow_dispatch:  # Allows manual triggering from GitHub UI
+    # 0:45 AM UTC = 6:15 AM IST
+    # 12:45 PM UTC = 6:15 PM IST
+    - cron: '45 0,12 * * *'
+  workflow_dispatch:   # Allows manual triggering from GitHub UI
+
+# Prevent two runs overlapping if CI is slow
+concurrency:
+  group: yoagent-repost
+  cancel-in-progress: false
 
 jobs:
-  run-repost:
+  upload-short:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -21,33 +26,28 @@ jobs:
           cache: 'pip'
 
       - name: Install Dependencies
-        run: |
-          pip install -r requirements.txt
+        run: pip install -r requirements.txt
 
-      - name: Run InstaAgent
+      - name: Run YoAgent
         env:
-          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          IG_ACCOUNT_ID: ${{ secrets.IG_ACCOUNT_ID }}
-          IG_SESSION_ID: ${{ secrets.IG_SESSION_ID }}
-          IG_SCRAPE_USER: ${{ secrets.IG_SCRAPE_USER }}
-          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
-          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
-          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
-          FB_PAGE_ACCESS_TOKEN: ${{ secrets.FB_PAGE_ACCESS_TOKEN }}
-          FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
+          IG_SESSION_ID:           ${{ secrets.IG_SESSION_ID }}
+          IG_SCRAPE_USER:          ${{ secrets.IG_SCRAPE_USER }}
+          YOUTUBE_CLIENT_ID:       ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET:   ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN:   ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
         run: |
-          # Add a random delay below 10 seconds
-          delay=$((RANDOM % 10))
-          echo "Sleeping for $delay seconds before posting..."
+          # Random delay (60–300 s) to avoid predictable bot patterns.
+          # GitHub Actions runners share IP pools — jitter reduces fingerprinting.
+          delay=$((RANDOM % 241 + 60))
+          echo "Sleeping for ${delay}s before starting..."
           sleep $delay
-          
-          # Run the repost pipeline
+
           python main.py --repost
 
       - name: Commit Dedup Tracker (if changed)
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/reposted_ids.txt data/last_post_type.txt
-          # Only commit if there are changes
-          git diff --quiet && git diff --staged --quiet || (git commit -m "chore: update repost tracker" && git push)
+          git add data/reposted_ids.txt
+          git diff --quiet && git diff --staged --quiet || \
+            (git commit -m "chore: update repost tracker" && git push)

@@ -1,8 +1,11 @@
 """
 core/repost_tracker.py — Lightweight dedup tracker using a plain text file.
 
-Stores one Instagram shortcode (post ID) per line in data/reposted_ids.txt.
-Replaces the SQLite repost_log for cloud-friendly, zero-dependency tracking.
+Stores one post ID per line in data/reposted_ids.txt.
+Cloud-friendly, zero-dependency tracking — committed to Git by CI after each run.
+
+Performance: IDs are cached in a module-level set on first load, giving O(1)
+lookup regardless of how many IDs accumulate over time.
 
 Usage:
     from core.repost_tracker import is_reposted, mark_reposted
@@ -12,10 +15,13 @@ Usage:
         mark_reposted("DU3i6qPDTOH")
 """
 
-import os
 from pathlib import Path
+from typing import Optional
 
 _TRACKER_FILE = Path("data/reposted_ids.txt")
+
+# In-memory cache — loaded once per process, kept in sync on writes.
+_id_cache: Optional[set] = None
 
 
 def _ensure_file() -> None:
@@ -24,21 +30,30 @@ def _ensure_file() -> None:
         _TRACKER_FILE.touch()
 
 
+def _get_cache() -> set:
+    """Return the in-memory ID set, loading from disk on first call."""
+    global _id_cache
+    if _id_cache is None:
+        _ensure_file()
+        raw = _TRACKER_FILE.read_text(encoding="utf-8").splitlines()
+        _id_cache = {line.strip() for line in raw if line.strip()}
+    return _id_cache
+
+
 def is_reposted(post_id: str) -> bool:
-    """Return True if this shortcode has already been posted."""
-    _ensure_file()
-    ids = _TRACKER_FILE.read_text(encoding="utf-8").splitlines()
-    return post_id.strip() in ids
+    """Return True if this ID has already been uploaded (O(1) set lookup)."""
+    return post_id.strip() in _get_cache()
 
 
 def mark_reposted(post_id: str) -> None:
-    """Append a shortcode to the tracker file."""
+    """Append an ID to the tracker file and update the in-memory cache."""
+    clean_id = post_id.strip()
+    _get_cache().add(clean_id)          # keep cache in sync
     _ensure_file()
     with open(_TRACKER_FILE, "a", encoding="utf-8") as f:
-        f.write(post_id.strip() + "\n")
+        f.write(clean_id + "\n")
 
 
-def all_reposted() -> list[str]:
+def all_reposted() -> list:
     """Return all tracked post IDs (for debugging/inspection)."""
-    _ensure_file()
-    return [l.strip() for l in _TRACKER_FILE.read_text(encoding="utf-8").splitlines() if l.strip()]
+    return sorted(_get_cache())

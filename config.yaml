@@ -1,62 +1,47 @@
 # ============================================================
-# InstaAgent — Runtime Configuration (Serverless Repost Mode)
+# YoAgent — Runtime Configuration (YouTube Shorts Pipeline)
 # ============================================================
 
-# ── Cloudinary Uploads ────────────────────────────────────────
-image_server:
-  use_cloudinary: true # Uploads to Cloudinary (free, stable public URL)
+# ── Scraping Source ───────────────────────────────────────────
+# "instagram" or "youtube"
+scrape_source: youtube
 
-# ── Facebook Page ──────────────────────────────────────────────
-facebook:
-  enabled: false                 # Set false to stop posting to Facebook
-  page_name: "Self Explore"     # For reference only — not used in code
-
-# ── Repost Agent ──────────────────────────────────────────────
-# Scrapes images from public Islamic accounts and reposts them
-# with a rewritten caption. Triggered by GitHub Actions via: main.py --repost
+# ── Repost / Instagram Scraping ───────────────────────────────
 repost:
-  enabled: true
+  enabled: true              # Only relevant when scrape_source: instagram
   source_accounts:
-    - softeningsayings            # Public IG accounts to scrape images from
-  max_posts_to_check: 20          # How many recent posts to scan per run
-  include_reels: true            # Set true to also scrape & repost Reels (videos)
-  download_dir: media/reposts     # Local download directory (cleaned up automatically)
-  is_ramadan: false               # Set true during Ramadan to allow Ramadan content
-  post_to_story: true             # Also post the media to your Instagram Story
-  collaborators: []              # (Optional) List of usernames to invite as collaborators
-  add_credit_line: true           # Append "Via @softeningsayings 🤍" to caption
+    - softeningsayings          # Public IG accounts to scrape Reels from
+  max_posts_to_check: 20        # How many recent posts to scan per run
+  download_dir: media/reposts   # Local download directory (auto-cleaned after upload)
+  is_ramadan: false             # Set true during Ramadan to allow Ramadan content
+  add_credit_line: true         # Append "Via @softeningsayings 🤍" to description
 
-# ── Caption Generation ────────────────────────────────────────
-caption:
-  language: en_ar              # bilingual: English + Arabic
-  max_hashtags: 25
+# ── YouTube Scraping ──────────────────────────────────────────
+youtube_scraper:
+  source_urls:
+    - "https://www.youtube.com/@muftishamail/shorts"
+  max_videos_to_check: 20
+  download_dir: media/reposts
+  add_credit_line: true         # Will add channel name to description
 
-  # Fallback templates used by the rule-based engine
-  fallback_templates:
-    - |
-      سبحان الله — Glory be to Allah ☁️
+# ── YouTube Upload ────────────────────────────────────────────
+youtube:
+  privacy_status: public        # public | unlisted | private
+  category_id: 22               # 22 = People & Blogs (best fit for Islamic content)
+  made_for_kids: false          # Required by YouTube policy — set true only if applicable
 
-      Every sunrise is a reminder of His mercy.
-      Take a moment to reflect and be grateful.
+# ── Rate Limiting / Polite Scraping ──────────────────────────
+# Randomized sleep ranges (seconds) to avoid bot detection and
+# reduce the risk of IP rate-limiting or session invalidation.
+rate_limits:
+  # Delay before each yt-dlp video download (YouTube scraper)
+  yt_pre_download_min: 15
+  yt_pre_download_max: 45
 
-      Save this as a reminder 📌
+  # Delay between iterating Instagram posts (instaloader)
+  ig_post_iter_min: 4
+  ig_post_iter_max: 10
 
-      {hashtags}
-    - |
-      الحمد لله — All praise belongs to Allah 🤍
-
-      In every challenge, there is a hidden blessing.
-      Trust in Allah's plan — He knows what we do not.
-
-      Share with someone who needs this today 🤍
-
-      {hashtags}
-    - |
-      اللَّهُ أَكْبَر — Allah is the Greatest ✨
-
-      No matter what life brings, return to Him.
-      He is the Most Merciful, the Most Compassionate.
-
-      Tag a brother or sister ☁️
-
-      {hashtags}
+  # Extra delay before downloading a selected Instagram Reel
+  ig_pre_download_min: 6
+  ig_pre_download_max: 15

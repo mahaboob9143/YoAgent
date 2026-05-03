@@ -1,51 +1,56 @@
-# InstaAgent — Serverless Repost Architecture
+# YoAgent — YouTube Shorts Architecture
 
-A streamlined, cloud-native automation pipeline for Instagram reposting, optimized for running on **GitHub Actions** for $0/month.
+A serverless, cloud-native pipeline for autonomous YouTube Shorts publishing, running on **GitHub Actions** for $0/month.
 
 ---
 
 ## 🏗 Core Infrastructure
 
 ### 1. Cloud-Native Hosting (GitHub Actions)
-The entire system runs as a stateless container on GitHub-hosted runners. It is triggered twice daily via cron scheduling.
+The entire system runs as a stateless container on GitHub-hosted runners, triggered twice daily via cron.
 - **Workflow**: `.github/workflows/repost.yml`
-- **Persistence**: Since GitHub runners are ephemeral, the system maintains its deduplication state by committing `data/reposted_ids.txt` back to the repository after every successful run.
+- **Persistence**: The dedup tracker `data/reposted_ids.txt` is committed back to the repo after every successful run, keeping state across ephemeral runners.
 
-### 2. Public Image Proxy (Cloudinary)
-Meta's Graph API requires a publicly reachable URL to download images.
-- **Implementation**: The `PosterAgent` uploads the scraped image to **Cloudinary** (configured via GitHub Secrets) to get a stable public URL.
-- **Automatic Cleanup**: Immediately after the Meta API publishes the post, the script triggers a deletion request to Cloudinary to keep your storage usage at $0.
+### 2. Direct YouTube Upload
+Unlike the previous Instagram pipeline, no intermediate image/video hosting is required.
+The YouTube Data API v3 supports **resumable direct uploads** — the `.mp4` is streamed from the runner straight to YouTube in 10 MB chunks.
 
-### 3. Rule-Based Captioning (`core/caption_engine.py`)
-No LLM or Ollama is required. The system uses a bilingual (EN/AR) rule-based engine:
-- **Scoring**: It classifies the original caption into spiritual categories (Sabr, Shukr, Tawakkul, etc.).
-- **Assembling**: It stitches together a high-engagement structure: `[HOOK] + [BODY] + [CTA] + [HASHTAGS]`.
+### 3. Rule-Based Metadata Engine (`core/youtube_metadata_engine.py`)
+No LLM or external API needed. The engine:
+- **Cleans** the original Instagram caption (strips hashtags, normalizes whitespace)
+- **Classifies** it into one of 6 Islamic categories via keyword scoring: `sabr | shukr | tawakkul | akhirah | dua | general`
+- **Assembles** a YouTube-optimized: `Title + Description + Tags`
 
 ---
 
 ## 🤖 The Core Agents
 
 ### 1. RepostAgent (`agents/repost_agent.py`)
-- Scrapes the latest content from public Islamic "Competitor" accounts.
-- Uses **Instaloader** (no-login required for public profiles).
-- Validates aspect ratios to ensure Meta's API won't reject the image.
-- Cross-references the `reposted_ids.txt` tracker to ensure 100% unique content.
+- Scrapes Reels from public Islamic Instagram accounts using **Instaloader**.
+- Authenticates via session cookie (no login challenge required).
+- Applies content filters: skips Jummah posts on non-Fridays, skips Ramadan content when `is_ramadan=false`.
+- Cross-references `reposted_ids.txt` to ensure 100% unique content.
+- Downloads the `.mp4` to `media/reposts/` and returns the raw original caption.
 
-### 2. PosterAgent (`agents/poster_agent.py`)
-- Executes the official **Meta Graph API 3-step publishing flow**:
-  1. Uploads to Cloudinary.
-  2. Creates a Media Container on Instagram.
-  3. Polls status until `FINISHED`, then publishes.
-- Automatically cleans up local temporary files and Cloudinary assets.
+### 2. YouTubeUploaderAgent (`agents/youtube_uploader_agent.py`)
+- Authenticates via **OAuth2 refresh token** (stored as GitHub Secret — no browser needed in CI).
+- Uploads the video using the **resumable upload protocol** (chunk-safe, handles large files).
+- Sets title, description, tags, category, and privacy from the metadata engine output.
+- Supports `--dry-run` mode — logs intent without calling the API.
 
 ### 3. Orchestrator (`agents/orchestrator.py`)
-- The simplified controller that connects the `RepostAgent` and `PosterAgent`.
-- Handles error isolation and logging.
+- Connects RepostAgent → YouTubeMetadataEngine → YouTubeUploaderAgent.
+- Handles local `.mp4` cleanup after upload.
 
 ---
 
 ## 🔑 Key Files
-- `main.py`: Entry point (`python main.py --repost`).
-- `config.yaml`: Minimal configuration for sources and caption templates.
-- `requirements.txt`: Lightweight dependencies (no heavy LLM or local server libs).
-- `data/reposted_ids.txt`: The "Stateless Database" for deduplication.
+
+| File | Purpose |
+|---|---|
+| `main.py` | Entry point — `python main.py --repost` |
+| `config.yaml` | Runtime settings: source accounts, YouTube privacy, etc. |
+| `core/youtube_metadata_engine.py` | Rule-based title/description/tag generator |
+| `core/repost_tracker.py` | Flat-file dedup tracker |
+| `data/reposted_ids.txt` | The "Stateless Database" — one shortcode per line |
+| `scripts/get_youtube_token.py` | One-time local OAuth2 flow to get refresh token |

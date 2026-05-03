@@ -1,50 +1,43 @@
 """
-agents/repost_agent.py — RepostAgent for InstaAgent.
+agents/repost_agent.py — RepostAgent for YoAgent (Instagram Reels source).
 
 Responsibilities:
-  1. Check the repost_enabled feature flag.
-  2. Scrape recent image posts from configured PUBLIC source account(s)
-     using instaloader — NO LOGIN REQUIRED for public profiles.
-  3. Skip posts that have already been reposted (dedup via repost_log table).
-  4. Download a random unseen post image to media/reposts/.
-  5. Validate aspect ratio — skip incompatible ones.
-  6. Rewrite the caption using template substitution (no AI needed).
-  7. Log the source post to repost_log.
-  8. Return a result dict ready for PosterAgent.
+  1. Check the repost.enabled feature flag.
+  2. Scrape recent Reels from configured PUBLIC source account(s)
+     using instaloader. A session cookie is injected for authenticated
+     access; falls back to username+password, then anonymous.
+  3. Skip reels already uploaded (dedup via reposted_ids.txt).
+  4. Apply content filters (Jummah / Ramadan keywords).
+  5. Apply polite rate-limit delays between requests.
+  6. Download the reel .mp4 to media/reposts/.
+  7. Return a result dict ready for YouTubeUploaderAgent.
 
 Usage:
-  From orchestrator.repost_now() or directly:
     agent = RepostAgent()
     result = agent.run()
     if result:
-        poster_agent.post(image=result["image"], caption=result["caption"], topic="repost")
+        # result["video"]            — video dict with local_path
+        # result["original_caption"] — raw IG caption for metadata engine
+        # result["source_post_id"]   — Instagram shortcode (for dedup)
 """
 
+import io
 import os
-import re
 import random
 import time
-from io import BytesIO
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 import requests
-from PIL import Image as PILImage
 
 from core.repost_tracker import is_reposted as is_post_reposted, mark_reposted as log_repost
 from core.flags import get_config
 from core.logger import get_logger
-from core.caption_engine import build_caption
-from core.post_state import get_next_post_type, save_post_type
 
 logger = get_logger("RepostAgent")
 
-# ── Instagram-safe aspect ratio range ────────────────────────────────────────
-_IG_MIN_RATIO = 0.66   # 2:3 can be cropped to 4:5 safely
-_IG_MAX_RATIO = 1.91   # landscape max
-
 
 class RepostAgent:
-    """Scrapes a public Islamic Instagram account and reposts images with rewritten captions."""
+    """Scrapes Reels from a public Islamic Instagram account for YouTube Shorts upload."""
 
     def __init__(self):
         self.config = get_config()
@@ -53,29 +46,23 @@ class RepostAgent:
 
     def run(self) -> Optional[Dict[str, Any]]:
         """
-        Main entry point. Enforces an alternating image→reel→image→reel pattern.
-        Checks what was posted last, picks the opposite type, and returns a result
-        dict ready for PosterAgent, or None if nothing found.
+        Main entry point. Finds one unseen Reel from the configured source accounts
+        and returns a result dict ready for YouTubeUploaderAgent, or None if nothing found.
         """
         self.config = get_config()
         repost_cfg = self.config.get("repost", {})
 
         if not repost_cfg.get("enabled", False):
             logger.warning(
-                "repost_enabled=false — repost skipped "
+                "repost.enabled=false — skipped "
                 "(set repost.enabled: true in config.yaml)"
             )
             return None
 
         source_accounts = repost_cfg.get("source_accounts", ["softeningsayings"])
-        max_check = int(repost_cfg.get("max_posts_to_check", 20))
-        download_dir = repost_cfg.get("download_dir", "media/reposts")
-        add_credit = repost_cfg.get("add_credit_line", True)
-        include_reels = repost_cfg.get("include_reels", False)
-
-        # ── Alternating Pattern ───────────────────────────────────────────────
-        next_type = get_next_post_type() if include_reels else "image"
-        logger.info(f"Pattern mode: this run will post a {next_type.upper()}.")
+        max_check       = int(repost_cfg.get("max_posts_to_check", 20))
+        download_dir    = repost_cfg.get("download_dir", "media/reposts")
+        add_credit      = repost_cfg.get("add_credit_line", True)
 
         os.makedirs(download_dir, exist_ok=True)
 
@@ -85,35 +72,28 @@ class RepostAgent:
                 max_check=max_check,
                 download_dir=download_dir,
                 add_credit=add_credit,
-                include_reels=include_reels,
-                preferred_type=next_type,
             )
             if result:
-                # Save which type was just posted for the next run
-                posted_type = "reel" if result.get("is_reel") else "image"
-                save_post_type(posted_type)
                 return result
 
-        logger.warning("No new unseen posts found across all source accounts.")
+        logger.warning("No new unseen Reels found across all source accounts.")
         return None
 
-    # ── Scraping (authenticated via cookie, no challenge required) ─────────────
+    # ── Authentication ───────────────────────────────────────────────────────
 
     def _get_session_id(self) -> Optional[str]:
         """
         Retrieve a valid Instagram session ID from:
-          1. IG_SESSION_ID env var (URL-decoded in case it's %3A-encoded).
+          1. IG_SESSION_ID env var (URL-decoded if %3A-encoded).
           2. .ig_session.json — the instagrapi session cache on disk.
         Returns None if neither is available.
         """
         from urllib.parse import unquote
 
-        # Priority 1: env var
         raw = os.getenv("IG_SESSION_ID", "")
         if raw:
             return unquote(raw)
 
-        # Priority 2: instagrapi cache file (written by previous username/pass login)
         session_file = ".ig_session.json"
         if os.path.exists(session_file):
             try:
@@ -136,7 +116,6 @@ class RepostAgent:
         Falls back to fresh user/pass login, then anonymous (may be rate-limited).
         """
         import instaloader
-        import io
 
         L = instaloader.Instaloader(
             download_pictures=False,
@@ -149,19 +128,16 @@ class RepostAgent:
             quiet=True,
         )
 
-        # Suppress instaloader's internal 403-retry print messages —
-        # they bypass our logger and spam the console. Our own logs still work fine.
-        L.context.log_file = open(os.devnull, "w")
+        # Suppress instaloader's internal 403-retry print messages using
+        # an in-memory buffer instead of opening a real file handle.
+        L.context.log_file = io.StringIO()
 
         session_id = self._get_session_id()
-        username = os.getenv("IG_SCRAPE_USER", "")
-        password = os.getenv("IG_SCRAPE_PASS", "")
+        username   = os.getenv("IG_SCRAPE_USER", "")
+        password   = os.getenv("IG_SCRAPE_PASS", "")
 
         if session_id and username:
-            # Inject cookie — authenticated without triggering login challenge
-            L.context._session.cookies.set(
-                "sessionid", session_id, domain=".instagram.com"
-            )
+            L.context._session.cookies.set("sessionid", session_id, domain=".instagram.com")
             L.context.username = username
             logger.info(f"Instaloader authenticated via session cookie (@{username})")
         elif username and password:
@@ -174,10 +150,12 @@ class RepostAgent:
         else:
             logger.warning(
                 "No Instagram credentials found — anonymous access may be rate-limited. "
-                "Add IG_SCRAPE_USER + IG_SCRAPE_PASS (or IG_SESSION_ID) to .env"
+                "Add IG_SCRAPE_USER + IG_SESSION_ID to .env"
             )
 
         return L
+
+    # ── Scraping ─────────────────────────────────────────────────────────────
 
     def _process_account(
         self,
@@ -185,16 +163,14 @@ class RepostAgent:
         max_check: int,
         download_dir: str,
         add_credit: bool,
-        include_reels: bool = False,
-        preferred_type: str = "image",
     ) -> Optional[Dict[str, Any]]:
-        """Scrape a public account for images and/or reels."""
+        """Scrape a public account for unseen Reels."""
         import instaloader
 
-        logger.info(f"Scraping @{username} — looking for a {preferred_type.upper()}...")
+        logger.info(f"Scraping @{username} — looking for an unseen REEL...")
 
         try:
-            L = self._get_loader()
+            L       = self._get_loader()
             profile = instaloader.Profile.from_username(L.context, username)
         except Exception as exc:
             logger.error(f"Failed to access profile @{username}: {exc}")
@@ -202,243 +178,106 @@ class RepostAgent:
 
         logger.info(
             f"@{username}: {profile.mediacount} total posts — "
-            f"scanning up to {max_check} for unseen content..."
+            f"scanning up to {max_check} for unseen Reels..."
         )
 
-        # Collect candidates (images and/or reels)
-        image_candidates = []
+        # Collect reel candidates
         reel_candidates = []
+        rl = self.config.get("rate_limits", {})
+        iter_min = float(rl.get("ig_post_iter_min", 4))
+        iter_max = float(rl.get("ig_post_iter_max", 10))
+
         try:
             for post in profile.get_posts():
+                # Polite delay between each post inspection
+                time.sleep(random.uniform(iter_min, iter_max))
                 if post.is_video:
-                    if include_reels:
-                        reel_candidates.append(post)
-                elif post.typename in ("GraphImage", "XDTGraphImage"):
-                    image_candidates.append(post)
-                if len(image_candidates) + len(reel_candidates) >= max_check:
+                    reel_candidates.append(post)
+                if len(reel_candidates) >= max_check:
                     break
         except Exception as exc:
             logger.error(f"Error iterating posts from @{username}: {exc}")
 
-        if not image_candidates and not reel_candidates:
-            logger.warning(f"No suitable posts found on @{username}")
+        if not reel_candidates:
+            logger.warning(f"No Reels found on @{username}")
             return None
 
-        # Shuffle within each group
-        random.shuffle(image_candidates)
         random.shuffle(reel_candidates)
 
-        # Put preferred type first — fallback to the other type if none available
-        if preferred_type == "reel":
-            candidates = reel_candidates + image_candidates
-        else:
-            candidates = image_candidates + reel_candidates
-
-        for post in candidates:
+        for post in reel_candidates:
             post_id = str(post.shortcode)
 
-            # Dedup — skip if already reposted
+            # Dedup
             if is_post_reposted(post_id):
-                logger.debug(f"Already reposted {post_id} — skipping")
+                logger.debug(f"Already uploaded {post_id} — skipping")
                 continue
 
-            # Suitability Filter (Jummah/Friday/Ramadan checks)
+            # Content suitability filter
             if not self._is_post_suitable(post):
                 continue
 
-            # Route to image or reel handler
-            if post.is_video:
-                result = self._download_and_prepare_reel(
-                    post=post,
-                    username=username,
-                    download_dir=download_dir,
-                    add_credit=add_credit,
-                )
-            else:
-                result = self._download_and_prepare(
-                    post=post,
-                    username=username,
-                    download_dir=download_dir,
-                    add_credit=add_credit,
-                )
+            # Polite delay before downloading the selected Reel
+            rl = self.config.get("rate_limits", {})
+            dl_delay = random.uniform(
+                float(rl.get("ig_pre_download_min", 6)),
+                float(rl.get("ig_pre_download_max", 15)),
+            )
+            logger.info(f"Rate-limit: sleeping {dl_delay:.1f}s before Reel download...")
+            time.sleep(dl_delay)
+
+            result = self._download_reel(
+                post=post,
+                username=username,
+                download_dir=download_dir,
+                add_credit=add_credit,
+            )
             if result:
                 return result
 
-        logger.info(f"All checked posts from @{username} have already been reposted.")
+        logger.info(f"All Reels from @{username} have already been uploaded.")
         return None
+
+    # ── Content filters ───────────────────────────────────────────────────────
 
     def _is_post_suitable(self, post) -> bool:
         """
-        Check if the post is suitable for today based on keywords in the caption.
-        Example: Skip 'Jummah' posts if today is not Friday.
+        Skip posts that are day-specific (Jummah) or seasonal (Ramadan)
+        unless today matches the context.
         """
         from datetime import datetime
         caption = (post.caption or "").lower()
-        now = datetime.now()
-        
-        # 1. Friday / Jummah Filter
-        friday_keywords = ["friday", "jummah", "jumuah", "جمعة"]
-        is_friday_content = any(kw in caption for kw in friday_keywords)
-        is_today_friday = now.weekday() == 4  # 4 = Friday
-        
-        if is_friday_content and not is_today_friday:
-            logger.info(f"Skipping post {post.shortcode}: contains Friday/Jummah keywords but today is not Friday.")
-            return False
-        
-        if is_today_friday and not is_friday_content:
-            # Optional: You might want to prioritize Friday content on Friday, 
-            # but currently we just allow everything else too.
-            pass
+        now     = datetime.now()
 
-        # 2. Ramadan Filter
-        ramadan_keywords = ["ramadan", "ramazan", "iftar", "suhoor", "fasting", "رمضان"]
+        # Friday / Jummah filter
+        friday_keywords   = ["friday", "jummah", "jumuah", "جمعة"]
+        is_friday_content = any(kw in caption for kw in friday_keywords)
+        is_today_friday   = now.weekday() == 4
+
+        if is_friday_content and not is_today_friday:
+            logger.info(f"Skipping {post.shortcode}: Jummah content but today is not Friday.")
+            return False
+
+        # Ramadan filter
+        ramadan_keywords   = ["ramadan", "ramazan", "iftar", "suhoor", "fasting", "رمضان"]
         is_ramadan_content = any(kw in caption for kw in ramadan_keywords)
-        
-        # Check config for manual Ramadan toggle
-        repost_cfg = self.config.get("repost", {})
-        is_it_ramadan = repost_cfg.get("is_ramadan", False)
-        
+        is_it_ramadan      = self.config.get("repost", {}).get("is_ramadan", False)
+
         if is_ramadan_content and not is_it_ramadan:
-            logger.info(f"Skipping post {post.shortcode}: contains Ramadan keywords but 'is_ramadan' is false in config.")
+            logger.info(f"Skipping {post.shortcode}: Ramadan content but is_ramadan=false.")
             return False
 
         return True
 
-    # ── Download + prepare ───────────────────────────────────────────────────
+    # ── Download ──────────────────────────────────────────────────────────────
 
-    def _download_and_prepare(
+    def _download_reel(
         self,
         post,
         username: str,
         download_dir: str,
         add_credit: bool,
     ) -> Optional[Dict[str, Any]]:
-        """Download image, validate aspect ratio, rewrite caption, log to DB."""
-        post_id = str(post.shortcode)
-
-        try:
-            img_url = post.url   # highest-res image URL from instaloader
-            logger.info(f"Downloading post {post_id} from @{username}...")
-
-            headers = {
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                )
-            }
-            img_resp = requests.get(img_url, headers=headers, timeout=30)
-            img_resp.raise_for_status()
-
-            # Open and validate
-            img = PILImage.open(BytesIO(img_resp.content)).convert("RGB")
-            img_w, img_h = img.size
-            aspect_ratio = img_w / img_h if img_h > 0 else 0
-
-            # Pre-filter: skip images that are way outside Instagram's allowable range
-            if aspect_ratio < _IG_MIN_RATIO or aspect_ratio > _IG_MAX_RATIO:
-                logger.debug(
-                    f"Skipping {post_id} — incompatible aspect ratio "
-                    f"({aspect_ratio:.2f})"
-                )
-                # Log it so we don't re-check this post
-                log_repost(post_id)
-                return None
-
-            # Crop to Instagram-safe ratio + resize to max 1080px
-            img = self._fit_to_instagram(img, img_w, img_h, aspect_ratio)
-            final_w, final_h = img.size
-
-            # Save to disk
-            filename = f"repost_{post_id}.jpg"
-            local_path = os.path.abspath(os.path.join(download_dir, filename))
-            img.save(local_path, "JPEG", quality=95)
-
-            logger.info(
-                f"Downloaded @{username}/{post_id} -> {filename} "
-                f"({final_w}x{final_h})"
-            )
-
-            # Rewrite caption
-            original_caption = post.caption or ""
-            rewritten = self._rewrite_caption(
-                original=original_caption,
-                add_credit=add_credit,
-                credit_handle=username,
-            )
-
-            # Log to flat file tracker
-            log_repost(post_id)
-
-            logger.info("Caption rewritten. Ready to post.")
-
-            image_dict = {
-                "id": f"repost_{post_id}",
-                "local_path": local_path,
-                "width": final_w,
-                "height": final_h,
-                "source_post_id": post_id,
-                "_cleanup_path": local_path,   # PosterAgent will delete after publish
-            }
-
-            return {
-                "image": image_dict,
-                "caption": rewritten,
-                "source_post_id": post_id,
-            }
-
-        except Exception as exc:
-            logger.error(f"Failed to process post {post_id}: {exc}", exc_info=True)
-            return None
-
-    # ── Image normalization ───────────────────────────────────────────────────
-
-    def _fit_to_instagram(
-        self, img: PILImage.Image, img_w: int, img_h: int, ratio: float
-    ) -> PILImage.Image:
-        """Crop to Instagram-safe aspect ratio and resize to max 1080px."""
-        if ratio < 0.8:
-            # Too tall — crop to 4:5
-            new_h = int(img_w / 0.8)
-            crop_y = (img_h - new_h) // 2
-            img = img.crop((0, crop_y, img_w, crop_y + new_h))
-        elif ratio > 1.91:
-            # Too wide — crop to 1.91:1
-            new_w = int(img_h * 1.91)
-            crop_x = (img_w - new_w) // 2
-            img = img.crop((crop_x, 0, crop_x + new_w, img_h))
-
-        img.thumbnail((1080, 1350), PILImage.Resampling.LANCZOS)
-        return img
-
-    # ── Caption builder ───────────────────────────────────────────────────────
-
-    def _rewrite_caption(
-        self, original: str, add_credit: bool, credit_handle: str
-    ) -> str:
-        """
-        Delegates to caption_engine.build_caption():
-          1. Clean (strip hashtags, normalize whitespace)
-          2. Classify via keyword scoring (sabr/shukr/tawakkul/akhirah/dua/general)
-          3. Build [HOOK] + [BODY] + [EMOTIONAL LINE] + [CTA] + [HASHTAGS]
-          4. Append credit line if requested
-        """
-        return build_caption(
-            original=original,
-            add_credit=add_credit,
-            credit_handle=credit_handle,
-        )
-
-    # ── Reel downloader ───────────────────────────────────────────────────────
-
-    def _download_and_prepare_reel(
-        self,
-        post,
-        username: str,
-        download_dir: str,
-        add_credit: bool,
-    ) -> Optional[Dict[str, Any]]:
-        """Download a video reel, validate duration, rewrite caption, mark as reposted."""
+        """Download a Reel .mp4, validate size, mark as uploaded, return result dict."""
         post_id = str(post.shortcode)
 
         try:
@@ -447,7 +286,7 @@ class RepostAgent:
                 logger.warning(f"No video URL found for {post_id}")
                 return None
 
-            logger.info(f"Downloading reel {post_id} from @{username}...")
+            logger.info(f"Downloading Reel {post_id} from @{username}...")
 
             headers = {
                 "User-Agent": (
@@ -460,7 +299,7 @@ class RepostAgent:
             resp = requests.get(video_url, headers=headers, timeout=60, stream=True)
             resp.raise_for_status()
 
-            filename = f"reel_{post_id}.mp4"
+            filename   = f"reel_{post_id}.mp4"
             local_path = os.path.abspath(os.path.join(download_dir, filename))
 
             with open(local_path, "wb") as f:
@@ -468,43 +307,33 @@ class RepostAgent:
                     f.write(chunk)
 
             file_size_mb = os.path.getsize(local_path) / (1024 * 1024)
-            logger.info(f"Reel downloaded: {filename} ({file_size_mb:.1f} MB)")
+            logger.info(f"Downloaded: {filename} ({file_size_mb:.1f} MB)")
 
-            # Instagram Reels: max 90 seconds. We check file size as a proxy.
-            # (Rough rule: >200MB is likely too long for a typical Reel)
-            if file_size_mb > 200:
+            # YouTube Shorts max: ~256 MB / 3 minutes — skip if unreasonably large
+            if file_size_mb > 256:
                 logger.warning(f"Reel {post_id} is too large ({file_size_mb:.1f} MB) — skipping")
                 os.remove(local_path)
                 log_repost(post_id)
                 return None
 
-            # Rewrite caption
-            original_caption = post.caption or ""
-            rewritten = self._rewrite_caption(
-                original=original_caption,
-                add_credit=add_credit,
-                credit_handle=username,
-            )
-
-            # Mark as reposted
+            # Mark as uploaded so we never re-download it
             log_repost(post_id)
-            logger.info("Reel ready to post.")
+            logger.info(f"Reel {post_id} ready for YouTube upload.")
 
             video_dict = {
-                "id": f"reel_{post_id}",
-                "local_path": local_path,
-                "is_video": True,
+                "id":             f"reel_{post_id}",
+                "local_path":     local_path,
+                "is_video":       True,
                 "source_post_id": post_id,
-                "_cleanup_path": local_path,
+                "_cleanup_path":  local_path,
             }
 
             return {
-                "image": video_dict,   # Kept as 'image' key for PosterAgent compatibility
-                "caption": rewritten,
-                "source_post_id": post_id,
-                "is_reel": True,
+                "video":            video_dict,
+                "original_caption": post.caption or "",
+                "source_post_id":   post_id,
             }
 
         except Exception as exc:
-            logger.error(f"Failed to download reel {post_id}: {exc}", exc_info=True)
+            logger.error(f"Failed to download Reel {post_id}: {exc}", exc_info=True)
             return None

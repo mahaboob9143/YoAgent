@@ -1,70 +1,84 @@
-# Deployment Guide (GitHub Actions)
+# YoAgent — Deployment Guide (GitHub Actions)
 
-This guide explains how to deploy the InstaAgent Repost pipeline to GitHub Actions for **$0/month**.
-
-## How It Works
-1. GitHub Actions triggers the script twice daily based on a cron schedule.
-2. The script scrapes a post and generates the caption.
-3. The image is uploaded to **Cloudinary** so Meta's API can access it.
-4. The Meta Graph API publishes the post.
-5. The post's ID is saved to `data/reposted_ids.txt`, and the changed file is committed back to the repository automatically.
+Deploy YoAgent to run automatically twice daily for free using GitHub Actions.
 
 ---
 
-## 1. Cloudinary Setup (Image Hosting)
-Meta's Graph API requires a public URL to fetch images. `ngrok` doesn't work well for headless cloud runs. 
-Cloudinary provides a permanent public URL, and the script auto-deletes the image from Cloudinary as soon as Meta publishes it.
+## Step 1 — Fork / Push the Repo
 
-1. Go to [Cloudinary](https://cloudinary.com/) and create a free account.
-2. Go to Dashboard and copy:
-   - **Cloud Name**
-   - **API Key**
-   - **API Secret**
+Push this project to a GitHub repository. The workflow file at
+`.github/workflows/repost.yml` will be picked up automatically.
 
 ---
 
-## 2. GitHub Secrets Configuration
-In your GitHub Repository, go to **Settings > Secrets and variables > Actions > New repository secret**.
+## Step 2 — Get Your Instagram Session ID
 
-Add the following secrets:
-
-- `META_ACCESS_TOKEN` (Long-lived Graph API token)
-- `IG_ACCOUNT_ID` (Your Instagram account ID)
-- `IG_SESSION_ID` (Your session cookie from the browser)
-- `IG_SCRAPE_USER` (Optional target scraping user)
-- `CLOUDINARY_CLOUD_NAME` (From step 1)
-- `CLOUDINARY_API_KEY` 
-- `CLOUDINARY_API_SECRET`
+1. Log into Instagram in your browser (Chrome recommended).
+2. Open DevTools → **Application** → **Cookies** → `https://www.instagram.com`
+3. Find the cookie named `sessionid` and copy its value.
 
 ---
 
-## 3. GitHub Actions Configuration
-The schedule is defined in `.github/workflows/repost.yml`.
+## Step 3 — Set Up YouTube OAuth2 (One-Time Local Step)
 
-- **Morning:** `30 1 * * *` (1:30 AM UTC = 7:00 AM IST)
-- **Evening:** `30 13 * * *` (1:30 PM UTC = 7:00 PM IST)
+1. Go to [Google Cloud Console](https://console.cloud.google.com/).
+2. Create a project → Enable **YouTube Data API v3**.
+3. Go to **APIs & Services → Credentials → Create OAuth 2.0 Client ID**
+   - Application type: **Desktop App**
+   - Note down the **Client ID** and **Client Secret**.
+4. Add them to your local `.env`:
+   ```
+   YOUTUBE_CLIENT_ID=...
+   YOUTUBE_CLIENT_SECRET=...
+   ```
+5. Run the token helper:
+   ```bash
+   python scripts/get_youtube_token.py
+   ```
+6. A browser will open — log in with your **YouTube channel account**.
+7. Copy the printed `YOUTUBE_REFRESH_TOKEN`.
 
-**Humanization Delay:** The action file contains a short `sleep` command which introduces a random delay of 0-10 seconds before posting for scheduled cron runs (manual deployments skip this completely for testing).
 ---
 
-## 4. Give GitHub Actions Write Permissions
-Because the script tracks deduplication in `data/reposted_ids.txt` (and commits it), the Action needs permission to write to the repository.
+## Step 4 — Add GitHub Secrets
 
-1. In your GitHub repo, go to **Settings > Actions > General**.
-2. Scroll down to **Workflow permissions**.
-3. Select **Read and write permissions**.
-4. Check **Allow GitHub Actions to create and approve pull requests** (just in case).
-5. Save.
+Go to your GitHub repo → **Settings → Secrets and variables → Actions → New repository secret**
+
+Add these 5 secrets:
+
+| Secret Name | Value |
+|---|---|
+| `IG_SCRAPE_USER` | Your Instagram username |
+| `IG_SESSION_ID` | The `sessionid` cookie value from Step 2 |
+| `YOUTUBE_CLIENT_ID` | From Google Cloud Console |
+| `YOUTUBE_CLIENT_SECRET` | From Google Cloud Console |
+| `YOUTUBE_REFRESH_TOKEN` | From `get_youtube_token.py` output |
 
 ---
 
-## 5. Test It
-Go to the **Actions** tab in GitHub > **Repost Pipeline** > **Run workflow**.
+## Step 5 — Test Manually
 
-Wait ~2 minutes and verify:
-1. Did the post appear on Instagram?
-2. Did the Action finish cleanly?
-3. Was `data/reposted_ids.txt` updated in the code?
+Go to your repo → **Actions → YouTube Shorts Pipeline → Run workflow**
 
-## Maintenance
-The only maintenance required is updating `IG_SESSION_ID` in GitHub Secrets roughly every ~90 days when the Instagram browser session cookie expires.
+Check the logs to confirm:
+- ✅ Reel scraped from `@softeningsayings`
+- ✅ YouTube title / description generated
+- ✅ Video uploaded to YouTube Shorts
+- ✅ `data/reposted_ids.txt` committed back
+
+---
+
+## Schedule
+
+The pipeline runs automatically at:
+- **6:00 AM IST** (12:30 AM UTC)
+- **6:00 PM IST** (12:30 PM UTC)
+
+To change the schedule, edit the `cron` value in `.github/workflows/repost.yml`.
+
+---
+
+## Refreshing the Instagram Session
+
+Instagram session cookies expire periodically (~90 days).  
+When the pipeline starts failing with auth errors, repeat Step 2 and update the `IG_SESSION_ID` secret.

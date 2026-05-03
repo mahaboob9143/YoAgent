@@ -1,5 +1,5 @@
 """
-core/flags.py — Config reader for InstaAgent.
+core/flags.py — Config reader for YoAgent.
 
 Reads config.yaml on every call.
 """
