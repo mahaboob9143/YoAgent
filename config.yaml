@@ -20,7 +20,7 @@ repost:
 youtube_scraper:
   source_urls:
     - "https://www.youtube.com/@muftishamail/shorts"
-  max_videos_to_check: 20
+  max_videos_to_check: 2
   download_dir: media/reposts
   add_credit_line: true         # Will add channel name to description
 
@@ -35,8 +35,8 @@ youtube:
 # reduce the risk of IP rate-limiting or session invalidation.
 rate_limits:
   # Delay before each yt-dlp video download (YouTube scraper)
-  yt_pre_download_min: 15
-  yt_pre_download_max: 45
+  yt_pre_download_min: 2
+  yt_pre_download_max: 5
 
   # Delay between iterating Instagram posts (instaloader)
   ig_post_iter_min: 4

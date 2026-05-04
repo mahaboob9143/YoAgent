@@ -50,7 +50,8 @@ jobs:
         run: |
           # Random delay (60–300 s) to avoid predictable bot patterns.
           # GitHub Actions runners share IP pools — jitter reduces fingerprinting.
-          delay=$((RANDOM % 241 + 60))
+          # For testing, reduce this to 5 seconds
+          delay=5
           echo "Sleeping for ${delay}s before starting..."
           sleep $delay
 
