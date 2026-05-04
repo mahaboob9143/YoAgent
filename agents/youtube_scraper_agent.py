@@ -33,6 +33,33 @@ from core.logger import get_logger
 logger = get_logger("YouTubeScraperAgent")
 
 
+def _get_cookies_file() -> Optional[str]:
+    """
+    Return the path to a Netscape-format cookies.txt file for yt-dlp, or None.
+
+    Resolution order:
+      1. YOUTUBE_COOKIES_FILE env var (set by the GitHub Actions workflow after
+         decoding the YOUTUBE_COOKIES_B64 secret).
+      2. A 'cookies.txt' file in the current working directory (local dev fallback).
+    """
+    env_path = os.getenv("YOUTUBE_COOKIES_FILE", "").strip()
+    if env_path and os.path.isfile(env_path):
+        logger.info(f"Using YouTube cookies file: {env_path}")
+        return env_path
+
+    local_path = "cookies.txt"
+    if os.path.isfile(local_path):
+        logger.info(f"Using local cookies file: {local_path}")
+        return os.path.abspath(local_path)
+
+    logger.warning(
+        "No YouTube cookies file found. "
+        "Downloads may fail on CI runners. "
+        "Set YOUTUBE_COOKIES_B64 in GitHub Secrets — see DEPLOYMENT.md."
+    )
+    return None
+
+
 class YouTubeScraperAgent:
     """Scrapes Shorts from a YouTube channel for reposting."""
 
@@ -90,11 +117,13 @@ class YouTubeScraperAgent:
         """Scrape a YouTube channel URL for unseen Shorts."""
         logger.info(f"Scraping {url} — looking for an unseen SHORT...")
 
+        cookies_file = _get_cookies_file()
         ydl_opts_flat = {
             'extract_flat': True,
             'quiet': True,
             'no_warnings': True,
-            'playlistend': max_check, # Only fetch up to max_check items
+            'playlistend': max_check,  # Only fetch up to max_check items
+            **({'cookiefile': cookies_file} if cookies_file else {}),
         }
 
         video_candidates = []
@@ -118,6 +147,7 @@ class YouTubeScraperAgent:
         # Optional: shuffle to mix it up, or keep chronological
         random.shuffle(video_candidates)
 
+        last_valid_id: Optional[str] = None  # fallback if entire pool is already uploaded
         for video_info in video_candidates:
             if not video_info:
                 continue
@@ -125,6 +155,10 @@ class YouTubeScraperAgent:
             video_id = video_info.get('id')
             if not video_id:
                 continue
+
+            # Track the last valid candidate as a forced fallback in case the
+            # entire pool turns out to be already uploaded (see end of loop).
+            last_valid_id = video_id
 
             # Dedup
             if is_post_reposted(video_id):
@@ -150,6 +184,28 @@ class YouTubeScraperAgent:
             if result:
                 return result
 
+        # ── Fallback: entire pool was already uploaded ────────────────────────
+        # Rather than returning nothing and silently skipping the run, repost
+        # the last valid candidate so the channel always gets fresh content.
+        if last_valid_id:
+            logger.warning(
+                f"All {len(video_candidates)} recent videos already uploaded. "
+                f"Falling back to repost last candidate: {last_valid_id}"
+            )
+            rl = self.config.get("rate_limits", {})
+            delay = random.uniform(
+                float(rl.get("yt_pre_download_min", 3)),
+                float(rl.get("yt_pre_download_max", 9)),
+            )
+            logger.info(f"Rate-limit: sleeping {delay:.1f}s before fallback download...")
+            time.sleep(delay)
+            return self._download_video(
+                video_id=last_valid_id,
+                channel_url=url,
+                download_dir=download_dir,
+                add_credit=add_credit,
+            )
+
         logger.info(f"All recent videos from {url} have already been uploaded.")
         return None
 
@@ -168,11 +224,13 @@ class YouTubeScraperAgent:
 
         filename_template = os.path.join(download_dir, f"yt_{video_id}.%(ext)s")
 
+        cookies_file = _get_cookies_file()
         ydl_opts = {
             'format': 'b[ext=mp4]/best',   # best pre-merged mp4 (no ffmpeg required)
             'outtmpl': filename_template,
             'quiet': True,
             'no_warnings': True,
+            **({'cookiefile': cookies_file} if cookies_file else {}),
         }
 
         max_attempts = 3
@@ -181,9 +239,11 @@ class YouTubeScraperAgent:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
 
-                    # Verify duration — skip if not actually a Short
+                    # Verify duration — skip if not actually a Short.
+                    # YouTube Shorts max is 3 minutes (180 s) as of October 2024.
+                    # Use 175 s as the cutoff to allow a small encoding/metadata buffer.
                     duration = info.get('duration', 0)
-                    if duration > 70:  # allow slight leeway beyond the nominal 60s
+                    if duration > 175:
                         logger.info(
                             f"Skipping {video_id} — duration {duration}s (too long for a Short)"
                         )

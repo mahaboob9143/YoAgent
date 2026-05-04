@@ -1,5 +1,7 @@
 # Secrets — NEVER commit
 .env
+cookies.txt
+yt_cookies_slim.txt
 
 # Database
 *.db

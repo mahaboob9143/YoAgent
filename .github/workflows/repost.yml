@@ -28,6 +28,17 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
+      - name: Decode YouTube Cookies
+        env:
+          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
+        run: |
+          if [ -n "$YOUTUBE_COOKIES_B64" ]; then
+            echo "$YOUTUBE_COOKIES_B64" | base64 -d > /tmp/yt_cookies.txt
+            echo "✅ YouTube cookies file decoded successfully."
+          else
+            echo "⚠️  YOUTUBE_COOKIES_B64 secret not set — downloads may fail on CI."
+          fi
+
       - name: Run YoAgent
         env:
           IG_SESSION_ID:           ${{ secrets.IG_SESSION_ID }}
@@ -35,6 +46,7 @@ jobs:
           YOUTUBE_CLIENT_ID:       ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET:   ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN:   ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_COOKIES_FILE:    /tmp/yt_cookies.txt
         run: |
           # Random delay (60–300 s) to avoid predictable bot patterns.
           # GitHub Actions runners share IP pools — jitter reduces fingerprinting.
