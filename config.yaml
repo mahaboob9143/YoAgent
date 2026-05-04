@@ -29,7 +29,7 @@ youtube_scraper:
   #                     GitHub Actions / datacenter IP blocks from YouTube).
   # use_cobalt: false → Download via yt-dlp directly (works locally on
   #                     residential IPs, blocked on CI).
-  use_cobalt: true
+  use_cobalt: false
 
 # ── YouTube Upload ────────────────────────────────────────────
 youtube:

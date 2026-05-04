@@ -14,7 +14,18 @@ concurrency:
 
 jobs:
   upload-short:
-    runs-on: ubuntu-latest
+    # ── Self-hosted runner ────────────────────────────────────────────────────
+    # Runs on your own Windows PC instead of GitHub's cloud (Azure) servers.
+    # Reason: GitHub-hosted runners use Microsoft Azure datacenter IPs which
+    # YouTube blocks for video downloads. A home/residential IP is not blocked.
+    #
+    # One-time setup (~5 min):
+    #   1. Go to: https://github.com/mahaboob9143/YoAgent/settings/actions/runners
+    #   2. Click "New self-hosted runner" → Windows x64
+    #   3. Run the PowerShell commands shown on that page on your PC
+    #   4. Install as a Windows service so it auto-starts (shown in step 3 page)
+    runs-on: self-hosted
+
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -28,33 +39,15 @@ jobs:
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Decode YouTube Cookies
-        env:
-          YOUTUBE_COOKIES_B64: ${{ secrets.YOUTUBE_COOKIES_B64 }}
-        run: |
-          if [ -n "$YOUTUBE_COOKIES_B64" ]; then
-            echo "$YOUTUBE_COOKIES_B64" | base64 -d > /tmp/yt_cookies.txt
-            echo "✅ YouTube cookies file decoded successfully."
-          else
-            echo "⚠️  YOUTUBE_COOKIES_B64 secret not set — downloads may fail on CI."
-          fi
-
       - name: Run YoAgent
         env:
-          IG_SESSION_ID:           ${{ secrets.IG_SESSION_ID }}
-          IG_SCRAPE_USER:          ${{ secrets.IG_SCRAPE_USER }}
           YOUTUBE_CLIENT_ID:       ${{ secrets.YOUTUBE_CLIENT_ID }}
           YOUTUBE_CLIENT_SECRET:   ${{ secrets.YOUTUBE_CLIENT_SECRET }}
           YOUTUBE_REFRESH_TOKEN:   ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
-          YOUTUBE_COOKIES_FILE:    /tmp/yt_cookies.txt
         run: |
-          # Random delay (60–300 s) to avoid predictable bot patterns.
-          # GitHub Actions runners share IP pools — jitter reduces fingerprinting.
-          # For testing, reduce this to 5 seconds
-          delay=5
-          echo "Sleeping for ${delay}s before starting..."
-          sleep $delay
-
+          $delay = Get-Random -Minimum 5 -Maximum 30
+          Write-Host "Sleeping for ${delay}s before starting..."
+          Start-Sleep -Seconds $delay
           python main.py --repost
 
       - name: Commit Dedup Tracker (if changed)
@@ -62,5 +55,8 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add data/reposted_ids.txt
-          git diff --quiet && git diff --staged --quiet || \
-            (git commit -m "chore: update repost tracker" && git push)
+          $changes = git status --porcelain
+          if ($changes) {
+            git commit -m "chore: update repost tracker"
+            git push
+          }
