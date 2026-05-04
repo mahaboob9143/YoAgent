@@ -24,6 +24,13 @@ youtube_scraper:
   download_dir: media/reposts
   add_credit_line: true         # Will add channel name to description
 
+  # ── Downloader backend ────────────────────────────────────────
+  # use_cobalt: true  → Download via Cobalt.tools API (proxied — bypasses
+  #                     GitHub Actions / datacenter IP blocks from YouTube).
+  # use_cobalt: false → Download via yt-dlp directly (works locally on
+  #                     residential IPs, blocked on CI).
+  use_cobalt: true
+
 # ── YouTube Upload ────────────────────────────────────────────
 youtube:
   privacy_status: public        # public | unlisted | private
