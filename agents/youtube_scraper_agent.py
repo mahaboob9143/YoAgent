@@ -45,7 +45,6 @@ logger = get_logger("YouTubeScraperAgent")
 # ── Cobalt API ────────────────────────────────────────────────────────────────
 # Cobalt is a free, open-source video-download proxy (https://cobalt.tools).
 # Requests go to their servers, so the CI runner IP is never exposed to YouTube.
-COBALT_API_URL = "https://api.cobalt.tools/"
 COBALT_TIMEOUT = 30          # seconds for the Cobalt API call
 COBALT_DL_TIMEOUT = 180      # seconds for the actual video stream download
 
@@ -308,70 +307,103 @@ class YouTubeScraperAgent:
 
     # ── Cobalt downloader ─────────────────────────────────────────────────────
 
+    # Known public cobalt-compatible instances (tried in order).
+    # The official api.cobalt.tools sometimes disables YouTube — fallbacks ensure resilience.
+    _COBALT_INSTANCES = [
+        "https://api.cobalt.tools/",
+        "https://cobalt.api.timelessnesses.me/",
+        "https://cobalt.api.lostfound.stream/",
+    ]
+
     def _download_via_cobalt(self, yt_url: str, local_path: str) -> bool:
         """
-        Download a YouTube video via the Cobalt.tools public API.
+        Download a YouTube video via the Cobalt.tools API.
 
         Cobalt proxies the download through their servers, bypassing YouTube's
         IP-based bot detection that blocks GitHub Actions datacenter IPs.
 
-        Returns True on success, False on any failure.
+        Tries multiple known public Cobalt instances in order.
+        Returns True on success, False if all instances fail.
         """
-        try:
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
-            payload = {
-                "url": yt_url,
-                "videoQuality": "720",   # reasonable quality for Shorts
-                "downloadMode": "auto",
-            }
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        # Correct Cobalt API field names: vQuality (not videoQuality)
+        # Sends minimal payload first; the url field is the only required one.
+        payload = {
+            "url": yt_url,
+            "vQuality": "720",
+            "vCodec": "h264",
+        }
 
-            logger.info(f"Cobalt API: requesting {yt_url} ...")
-            resp = _requests.post(
-                COBALT_API_URL,
-                json=payload,
-                headers=headers,
-                timeout=COBALT_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.json()
+        for instance_url in self._COBALT_INSTANCES:
+            try:
+                logger.info(f"Cobalt: trying {instance_url} for {yt_url} ...")
+                resp = _requests.post(
+                    instance_url,
+                    json=payload,
+                    headers=headers,
+                    timeout=COBALT_TIMEOUT,
+                )
 
-            status = data.get("status", "")
-            if status == "error":
-                err = data.get("error", {})
-                logger.warning(f"Cobalt API error: {err.get('code', 'unknown')} — {err}")
-                return False
+                # On 400, retry with the bare-minimum payload (just url)
+                # — some instances reject optional fields they don't recognise.
+                if resp.status_code == 400:
+                    logger.debug("Cobalt 400 — retrying with minimal payload...")
+                    resp = _requests.post(
+                        instance_url,
+                        json={"url": yt_url},
+                        headers=headers,
+                        timeout=COBALT_TIMEOUT,
+                    )
 
-            download_url = data.get("url")
-            if not download_url:
-                logger.warning(f"Cobalt returned status '{status}' but no download URL.")
-                return False
+                resp.raise_for_status()
+                data = resp.json()
 
-            logger.info(f"Cobalt returned '{status}' — streaming video to disk...")
-            with _requests.get(download_url, stream=True, timeout=COBALT_DL_TIMEOUT) as stream:
-                stream.raise_for_status()
-                with open(local_path, "wb") as f:
-                    for chunk in stream.iter_content(chunk_size=1024 * 1024):
-                        f.write(chunk)
+                status = data.get("status", "")
+                if status == "error":
+                    err = data.get("error", {})
+                    logger.warning(
+                        f"Cobalt ({instance_url}) returned error: "
+                        f"{err.get('code', 'unknown')} — {err}"
+                    )
+                    continue  # try next instance
 
-            if os.path.getsize(local_path) < 1024:
-                logger.warning("Cobalt download produced an empty / near-empty file.")
-                os.remove(local_path)
-                return False
+                download_url = data.get("url")
+                if not download_url:
+                    logger.warning(
+                        f"Cobalt ({instance_url}) returned status '{status}' "
+                        "but no download URL — skipping."
+                    )
+                    continue
 
-            return True
+                logger.info(f"Cobalt returned '{status}' — streaming to disk...")
+                with _requests.get(download_url, stream=True, timeout=COBALT_DL_TIMEOUT) as stream:
+                    stream.raise_for_status()
+                    with open(local_path, "wb") as f:
+                        for chunk in stream.iter_content(chunk_size=1024 * 1024):
+                            f.write(chunk)
 
-        except Exception as exc:
-            logger.warning(f"Cobalt download exception: {exc}")
-            # Clean up partial file if it exists
-            if os.path.exists(local_path):
-                try:
+                if os.path.getsize(local_path) < 1024:
+                    logger.warning("Cobalt produced an empty/near-empty file — skipping.")
                     os.remove(local_path)
-                except OSError:
-                    pass
-            return False
+                    continue
+
+                logger.info(f"Cobalt download successful via {instance_url}")
+                return True
+
+            except Exception as exc:
+                logger.warning(f"Cobalt instance {instance_url} failed: {exc}")
+                if os.path.exists(local_path):
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
+                continue  # try next instance
+
+        logger.warning("All Cobalt instances failed.")
+        return False
 
     # ── yt-dlp fallback downloader ────────────────────────────────────────────
 
