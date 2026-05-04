@@ -123,6 +123,7 @@ class YouTubeScraperAgent:
             'quiet': True,
             'no_warnings': True,
             'playlistend': max_check,  # Only fetch up to max_check items
+            'extractor_args': {'youtube': ['player_client=android']},
             **({'cookiefile': cookies_file} if cookies_file else {}),
         }
 
@@ -230,6 +231,7 @@ class YouTubeScraperAgent:
             'outtmpl': filename_template,
             'quiet': True,
             'no_warnings': True,
+            'extractor_args': {'youtube': ['player_client=android']},
             **({'cookiefile': cookies_file} if cookies_file else {}),
         }
 
